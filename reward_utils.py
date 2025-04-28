@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 from modelscope.models import Model
-
+import json
 
 def extract_xml_answer(text: str) -> str:
     answer = text.split("<answer>")[-1]
@@ -82,8 +82,7 @@ def greedy_linear_sum_assignment(sim_matrix):
     return zip(*matches)
 
 
-
-def extract_entities(generated: str) -> List[Dict]:
+def extract_entities_old(generated: str) -> List[Dict]:
     """从乱序文本中提取结构化信息"""
     V3result = {}
     pattern = r'\*\*(.*?)\*\*'
@@ -106,24 +105,101 @@ def extract_entities(generated: str) -> List[Dict]:
     return V3result
 
 
+# 把提取的字典转为字符串
+def flatten_reasoning(info_list):
+    return "\n".join(f"   - **{item['source']}**：{item['reasoning']}" for item in info_list)
+
+
+def extract_entities(generated: str) -> Tuple[Dict[str, List[Dict[str, str]]], str]:
+    """
+    从生成的文本中提取结构化信息，并返回第一个疾病标题前的内容。
+
+    返回：
+    - parsed_entities: {疾病名称: [{"source": 信息来源, "reasoning": 推理过程}, ...]}
+    - preamble_text: 疾病标题之前的原始文本
+    """
+    result = {}
+    preamble = ""
+    pattern_title = r'## \*\*(.*?)\*\*'  # 疾病名称
+    pattern_source = r'- \*\*(.*?)\*\*：(.*)'  # 信息来源及推理内容
+
+    current_disease = None
+    first_title_found = False
+
+    lines = generated.splitlines()
+
+    for idx, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+
+        title_match = re.match(pattern_title, line)
+        if title_match:
+            current_disease = title_match.group(1).strip()
+            result[current_disease] = []
+            first_title_found = True
+            continue
+
+        if not first_title_found:
+            # 如果第一个标题还没找到，把内容加到 preamble 里
+            preamble += line + "\n"
+            continue
+
+        if current_disease:
+            source_match = re.match(pattern_source, line)
+            if source_match:
+                source = source_match.group(1).strip()
+                reasoning = source_match.group(2).strip()
+                result[current_disease].append({
+                    "source": source,
+                    "reasoning": reasoning
+                })
+
+    return result, preamble.strip()
+
+
 def get_reward_fn(model=None,tokenizer=None):
     def compute_rewards(completions, answer, **reward_kwargs) -> Dict:
         """计算奖励"""
         all_score = []
-        for ans, generated in zip(answer,completions):
+
+        # 单样本多推理，那么正确答案其实是一样的，只需要算一次
+        ground_truth = extract_entities(answer[0]['content'])[0]
+        expected_diseases = list(ground_truth.keys())
+        for disease in ground_truth:
+            ground_truth[disease] = flatten_reasoning(ground_truth[disease])
+
+        for _, generated in zip(answer,completions):
             generated = generated[0]['content']
-            ground_truth = ans
-            expected_diseases = list(ground_truth.keys())
+            # ground_truth = ans['content']
+            # expected_diseases = ?
             
-            parseddict = extract_entities(generated)
-            pred_diseases = list(parseddict.keys())
             total_reward = 0
+            parseddict, preamble = extract_entities(generated)
+            pred_diseases = list(parseddict.keys())
+            
+            if len(pred_diseases) == 0:
+                total_reward += -10
+            
+            if preamble:
+                penalty = min(len(preamble) / 100, 1.0)  # 每100个字扣0.01分，最多扣1分
+                total_reward -= penalty
 
             # 1. 基础格式奖励
-            if re.search(r"## \*\*.+?\*\*：", generated):
+            if re.search(r"## \*\*.+?\*\*", generated):
                 total_reward += 0.3  
-            if re.findall(r"\n-\ \*\*.+?\*\*：", generated):
-                total_reward += 0.2
+            # if re.findall(r"\n-\ \*\*.+?\*\*", generated):
+            #     total_reward += 0.2
+
+            # 额外小奖励：如果使用了具体信息来源
+            specific_sources = ["主诉", "现病史", "个人史", "既往史", "体格检查", "专科检查", "辅助检查"]
+            source_match_count = 0
+            for src in specific_sources:
+                if re.search(fr"- \*\*{re.escape(src)}\*\*：", generated):
+                    source_match_count += 1
+
+            total_reward += 0.1 * source_match_count
+
 
             def batch_encode(texts):
                 encoded = tokenizer(
@@ -163,7 +239,8 @@ def get_reward_fn(model=None,tokenizer=None):
                         gold_disease = expected_diseases[i]
                         pred_disease = pred_diseases[j]
                         gold_reason = ground_truth[gold_disease]
-                        pred_reason = parseddict[pred_disease]
+                        # pred_reason = parseddict[pred_disease] # old
+                        pred_reason = parseddict[flatten_reasoning(parseddict)]
 
                         # 计算诊断来源的emb的相似度
                         reason_embed_gold = batch_encode(gold_reason)

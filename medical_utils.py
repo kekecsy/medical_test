@@ -307,6 +307,55 @@ class AdmDataset(Dataset):
 
 
 
+# ------------------------  加载入院数据集  --------------------------------
+def process_data(data_path):
+    with open(data_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    for i in data:
+        i['output'] = "\n".join([f"## **{key}**：\n {value}" for key, value in i['output'].items()])
+    dataset = Dataset.from_list(data)
+    
+    processed_dataset = dataset.map(
+        lambda x: {
+            "prompt": [
+                {'role': 'system', 'content': 
+                # "你是一位经验丰富的医生，专门根据住院患者的病历资料进行初步疾病诊断。\n"
+                # "当提供患者的完整病历（包括：主诉、现病史、婚育史、个人史、体格检查、专科检查等）时，请根据以下格式给出初步可能的疾病诊断：\n"
+                # "对于每个可能的疾病，请严格按以下格式输出：\n"
+                # "## **疾病名称**：\n"
+                # "- **信息来源**（如主诉、体格检查等）：诊断推理过程\n"
+                # "- **信息来源2**：诊断推理过程\n"
+                # "...\n"
+                # "请从病历资料中提取出关键的诊断线索，标明具体的信息来源，并结合推理说明为什么支持该诊断。\n"
+                # "你的目标是提供清晰、有依据的初步诊断，以指导后续的进一步检查和治疗。\n"
+                "你是一位经验丰富的医生，专门根据住院患者的病历资料进行初步疾病诊断。\n"
+                "当提供患者的完整病历资料（包括：主诉、现病史、婚育史、个人史、既往史、体格检查、专科检查、辅助检查结果等）时，请严格按照以下要求给出可能的初步疾病诊断：\n"
+                "【输出要求】：\n"
+                "1. 每一个可能的疾病单独列出，使用：\n"
+                    "## **疾病名称**：\n"
+                "2. 对于每个疾病，请罗列出多个明确的信息来源，每条信息来源独占一行，格式如下：\n"
+                    "- **信息来源**：结合患者具体症状、体征或检查结果，进行诊断推理。\n"
+                    "其中，信息来源必须从以下标准中选择，例如：\n"
+                    "- **主诉**\n"
+                    "- **现病史**\n"
+                    "- **既往史**\n"
+                    "- **婚育史**\n"
+                    "- **个人史**\n"
+                    "- **体格检查**\n"
+                    "- **专科检查**\n"
+                    "- **辅助检查**\n"
+                "3. 每个信息来源后必须给出详细的推理过程，解释为什么这些信息支持该诊断。\n"
+                                            },
+                {'role': 'user', 'content': f"这里是患者的病历资料：{x['instruction']}\n"
+                                            "请根据提供的信息，按照上述指定格式，给出初步可能的疾病诊断。"},
+            ],
+            "answer": {'role': 'assistant', 'content': x['output']},
+        }
+    )
+    return processed_dataset
+
+
+
 if __name__ == '__main__':
     # data_path = '/data/csydata/deepseek_test/datasets/medical/medical_mokeqa.json'
     # model_path = "/data/csydata/deepseek_test/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
